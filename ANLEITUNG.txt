@@ -1,0 +1,310 @@
+﻿AD-ACL-Cleanup – geführter PowerShell-Assistent
+Stand: 30.09.2026 | Version 1.0
+
+SCHNELLSTART
+
+1. ZIP vollständig auf einen administrativen Windows-Host entpacken.
+2. Windows PowerShell 5.1 (64 Bit) öffnen. RSAT ActiveDirectory muss vorhanden
+   sein; für GPO-Schreibläufe zusätzlich GroupPolicy/GPMC.
+3. In den entpackten Ordner wechseln und starten:
+
+   .\Start-ADACLCleanup.ps1 -Server 'dc01.firma.local' -AuditOnly
+
+   Für den geführten Schreibmodus:
+
+   .\Start-ADACLCleanup.ps1 -Server 'dc01.firma.local'
+
+   Im ersten Menü B wählen. Auch dann wird vor jedem Schreibschritt zunächst
+   gescannt, eine Vorschau angezeigt und BEREINIGEN abgefragt.
+
+   Der erste Lauf sollte ein Leselauf sein. Die Windows-/AD-Integration muss
+   zunächst in eurer Testumgebung bzw. einem kontrollierten Pilot geprüft
+   werden. Hier wurden Syntax und simulierte Logik geprüft, keine echte AD-
+   oder SYSVOL-Bereinigung ausgeführt.
+
+   Eure Execution Policy bleibt unverändert. Falls eure Richtlinie signierte
+   Skripte verlangt, die Dateien nach eurem internen Verfahren signieren.
+
+ABLAUF
+
+Der Assistent ermittelt die beschreibbaren Naming Contexts aus RootDSE und
+dem NTDS-Settings-Objekt des ausgewählten DCs. Standardreihenfolge:
+
+  1. Domänenpartition, ohne den gesamten System/Policies-Teilbaum
+  2. DomainDnsZones
+  3. ForestDnsZones
+  4. Weitere auf diesem DC beschreibbar gespeicherte Anwendungspartitionen
+  5. Configuration, ohne den separat behandelten Schema-Teilbaum
+  6. Schema
+  7. GPOs, gemeinsam AD System/Policies und SYSVOL/Policies
+
+Pro Schritt: Start/überspringen/pausieren -> Scan -> Statusübersicht und
+Vorschau -> Details/erneut scannen/weiter -> Bestätigung -> DACL-Sicherungen
+-> Änderung -> direkte Objektprüfung -> erneuter kompletter Schritt-Scan
+-> Vorher/Nachher-Vergleich -> nächster Schritt.
+
+Menü D zeigt alle Befunde; before.csv enthält ebenfalls die komplette
+Vorschau. Im Terminal werden zunächst die ersten 25 Löschkandidaten gezeigt.
+Ein leerer Kandidatenbericht bedeutet nicht, dass jede SID geklärt ist.
+
+UMFANG – BITTE BEACHTEN
+
+Schreibumfang ist der ausgewählte beschreibbare DC, nicht automatisch der
+gesamte Forest. Andere Domänenpartitionen, nur partiell gespeicherte GC-
+Partitionen und nicht auf diesem DC gehostete Anwendungspartitionen werden
+nicht bearbeitet. Der Assistent listet bekannte nicht abgedeckte Partitionen
+auf. Für diese einen eigenen Lauf gegen einen passenden DC starten.
+
+SID-Validierung und Schreibumfang sind getrennt: Die SID-Prüfung berücksichtigt
+alle ermittelbaren Domänen des eigenen Forests sowie direkt erkannte externe
+Trust-Domänen beziehungsweise alle Domänen direkt vertrauter Forests.
+Zusätzliche relevante Migrations-/Validierungsdomänen können angegeben werden:
+
+   .\Start-ADACLCleanup.ps1 -Server 'dc01.firma.local' `
+       -AdditionalValidationDomain 'alt.example','partner.example' -AuditOnly
+
+Die GPO-Schreibziele sind ausschließlich:
+
+  CN=Policies,CN=System,<DefaultNamingContext>
+  \\<ausgewählter-DC>\SYSVOL\<DNS-Domäne>\Policies
+
+Jeweils inklusive Wurzel, aller Unterordner/Unterobjekte und Dateien. Es wird
+kein DFS-Domänenpfad benutzt: LDAP und SYSVOL sind an denselben DC gebunden.
+NETLOGON, SYSVOL/Scripts und das AGPM-Archiv werden nicht verändert.
+
+Lebende AD-Objekte mit dNSTombstoned=TRUE werden ebenfalls gelesen. Das ist
+nicht dasselbe wie ein gelöschtes AD-Objekt. AD-Deleted-Objects selbst gehören
+nicht zum ACL-Schreibscan; sie liefern ausschließlich Löschbelege.
+
+WELCHE SIDS WERDEN AUTOMATISCH ZUR ENTFERNUNG ANGEBOTEN?
+
+Ein Löschkandidat muss ALLE Bedingungen erfüllen:
+
+  - AD-Domänen-SID S-1-5-21-... mit RID mindestens 1000.
+  - SID-Präfix gehört nachweislich zu einer Domäne des eigenen Forests.
+  - Windows kann die SID nicht mehr in einen Kontonamen auflösen. Ein anderer
+    Auflösungsfehler als IdentityNotMapped blockiert die Freigabe.
+  - Kein lebendes Objekt mit dieser objectSid oder sIDHistory in allen
+    ermittelten Prüfdomänen. ForeignSecurityPrincipal-Treffer schützen die SID.
+  - Abfragen gegen zwei beschreibbare DCs je Prüfdomäne; kein Abfragefehler.
+  - Auf beiden geprüften DCs der Ursprungsdomäne existiert ein gelöschtes
+    Objekt mit genau dieser objectSid.
+  - Dessen whenChanged ist auf beiden DCs mindestens 30 Tage alt.
+  - Der konkrete ACE ist explizit gesetzt, nicht geerbt.
+
+Die positive Löschprüfung ist bewusst konservativ. Alte, bereits durch
+Garbage Collection entfernte Konten können damit NICHT automatisch belegt
+werden. Solche SIDs bleiben als Unklar stehen. Auch externe SIDs, nicht
+erreichbare Trusts, ein fehlender zweiter DC, fehlende Leserechte und frische
+Löschungen werden nicht als Freibrief für eine Entfernung behandelt.
+
+Die Wartezeit ist über -MinimumDeletedDays einstellbar (Standard 30, Minimum
+1). Es gibt keinen Schalter zum pauschalen Löschen aller unbekannten SIDs.
+Das Skript verändert keinerlei Konten, Gruppen oder sIDHistory-Attribute.
+
+Auch erfolgreiche AD-Abfragen beweisen nicht, dass ein Konto durch beliebige
+delegierte Leserechte alle Objekte sehen kann. Für die Validierung muss das
+ausführende Konto vollständige Lesesicht auf objectSid/sIDHistory und die
+benötigten Deleted-Objects-Belege haben. Replikation muss gesund sein. Ein
+zweiter DC verringert das Risiko veralteter Daten, ersetzt keinen Replikations-
+Healthcheck und keine vollständige Prüfung aller DCs.
+
+BERECHTIGUNGEN UND GRUPPEN
+
+Es gibt keine universelle Regel „Partition X verlangt zwingend Gruppe Y“.
+Entscheidend sind Lesen und WRITE_DAC am konkreten AD-Objekt beziehungsweise
+„Berechtigungen ändern“ am SYSVOL-Objekt, zusätzlich zur Lesesicht für die
+SID-Prüfung. Der Assistent zeigt folgende Orientierung:
+
+  Domäne/DomainDNS:    Domain Admins oder passende Delegation
+  Configuration:      Enterprise Admins oder passende Delegation
+  ForestDNS:          forestweite/partitionsbezogene Delegation prüfen
+  Schema:             Schema Admins oder explizite entsprechende Delegation
+  Anwendungspartition: Rechte des jeweiligen Partitionsverantwortlichen
+  GPOs:               Rechte auf GPC und GPT, ggf. euer AGPM-gMSA
+
+Eine bei euch vorhandene „GPO Admin“-Gruppe kann eine eigene delegierte Gruppe
+sein. Ihre bloße Bezeichnung ist kein Rechtebeleg. Group Policy Creator Owners
+ist nicht automatisch eine Berechtigung zum Ändern aller bestehenden GPO-ACLs.
+
+Das Skript weist niemandem Gruppen zu, setzt keine Owner und übernimmt keine
+Objekte. Fehlende Rechte werden protokolliert. Schon ein Lesefehler sperrt
+den Schreibschritt. Ein Schreibfehler stoppt den restlichen Schreibschritt;
+bereits erfolgte Änderungen bleiben mit Sicherungen dokumentiert.
+
+Nach einer Gruppenzuweisung gegebenenfalls abmelden/anmelden und die erhöhte
+PowerShell neu öffnen. Ein weiterlaufender Prozess bekommt dadurch nicht
+automatisch ein neues Windows-Token. klist purge allein ersetzt keine neue
+Anmeldesitzung für das lokale Gruppentoken. Anschließend:
+
+   .\Start-ADACLCleanup.ps1 -ResumeDirectory `
+       'C:\ProgramData\AD-ACL-Cleanup\Run-<Zeitstempel>-<ID>'
+
+Abgeschlossene direkte Schreibschritte werden bei Wiederaufnahme im
+Bereinigungsmodus übersprungen. Nicht bestätigte/fehlerhafte Schritte werden
+erneut angeboten und frisch gescannt. Ein Audit-Lauf prüft alle Schritte.
+Der gMSA-Schritt hat eigene Ergebnisse und wird bei Wiederaufnahme erneut
+angeboten; er wird nicht pauschal als erledigt eingetragen.
+
+GPO-SCHRITT ALS gMSA-TASK
+
+Im GPO-Schritt T wählen und einmal DOMÄNE\gMSA$ eingeben. Der Assistent muss
+dazu auf dem Windows-Host laufen, auf dem das gMSA bereits nutzbar ist,
+beispielsweise eurem AGPM-Server. Die Task-Registrierung ist lokal. Es wird
+keine PowerShell-Remoting- oder Kennwortweitergabe eingerichtet.
+
+Alternativ kann nur der GPO-Schritt gestartet werden:
+
+   .\Invoke-GpoGmsaCleanup.ps1 -Server 'dc01.firma.local' `
+       -GmsaAccount 'FIRMA\gmsaAGPM$' -AuditOnly
+
+   .\Invoke-GpoGmsaCleanup.ps1 -Server 'dc01.firma.local' `
+       -GmsaAccount 'FIRMA\gmsaAGPM$'
+
+Voraussetzungen auf diesem Host:
+
+  - Erhöhte Windows PowerShell 5.1; Module ActiveDirectory, GroupPolicy und
+    ScheduledTasks vorhanden.
+  - gMSA-Kennwortabruf ist für den Host zulässig; gMSA bereits eingerichtet;
+    Test-ADServiceAccount erfolgreich.
+  - gMSA darf sich als Stapelverarbeitungsauftrag anmelden; kein wirksames
+    „Anmelden als Stapelverarbeitungsauftrag verweigern“.
+  - gMSA hat GPC-/GPT-Rechte, GPO-Backup-Leserechte und ausreichende Rechte
+    für dieselbe forest-/trustweite SID-Prüfung einschließlich Löschbelegen.
+    Bestehende AGPM-Rechte allein garantieren insbesondere Letzteres nicht.
+  - LDAP/ADWS/SMB-Verbindungen und die Ausführung gemäß Execution Policy
+    sind möglich. Das gMSA braucht nicht pauschal Domain-Admin-Rechte.
+
+Ablauf:
+
+  1. Geschütztes lokales Arbeitsverzeichnis und Task unter
+     \AD-ACL-Cleanup\GPO-<ID> anlegen, ohne Zeittrigger.
+  2. Reinen Scan unter dem gMSA starten und auf dessen Ergebnis warten.
+  3. Ergebnisse im interaktiven Terminal anzeigen.
+  4. Mensch bestätigt BEREINIGEN.
+  5. Genau diesen Plan in den geschützten Code-Bereich kopieren, Hash binden.
+  6. Task unter gMSA erneut starten: SID-Prüfung erneuern, GPO-Backup erstellen,
+     DACLs sichern, nur bestätigte Ziele bearbeiten, Nachkontrolle ausführen.
+  7. Ergebnis im Terminal zeigen; beendeten Task entfernen. Berichte bleiben.
+
+Die Task-Aktion nutzt LogonType Password ohne manuell eingegebenes Kennwort.
+Windows verwaltet das gMSA-Kennwort. Der Worker selbst ist nicht interaktiv;
+alle Rückfragen erfolgen im Assistenten davor oder danach.
+
+Code/Requests/freigegebener Plan sind für das gMSA nur lesbar; getrennte Scan-
+und Ergebnisordner sind beschreibbar. Lokale Administratoren und SYSTEM bleiben
+vertrauenswürdige Administratoren. Keine Codefreigabe in einem allgemein
+beschreibbaren Share ablegen. Requests/Pläne verfallen nach vier Stunden.
+
+Task-Limit: 120 Minuten pro Scan/Schreibphase, über -TimeoutMinutes anpassbar.
+Bei Abbruch/Zeitlimit kann ein Teilstand bestehen. Protokoll und DACL-Backups
+prüfen, bevor ein neuer Lauf gestartet wird. Ein noch laufender Task wird
+nicht blind beendet oder entfernt.
+
+AGPM-EINORDNUNG
+
+Der gMSA ist hier ausschließlich das Ausführungskonto. Das Skript durchläuft
+keinen AGPM-Checkout/Check-in/Freigabeprozess und ändert das Archiv nicht.
+Während der Bereinigung keine GPO-Bearbeitung oder AGPM-Bereitstellung.
+
+Nachher GPMC-Delegation und GPC/GPT-Konsistenz kontrollieren. Bei AGPM-
+verwalteten GPOs zusätzlich das Verhalten bei späterer Bereitstellung mit
+eurem AGPM-Verantwortlichen prüfen. Ein Import aus Produktion ist ein
+separater AGPM-Vorgang und hier weder automatisch ausgeführt noch als
+garantierte Lösung für jede Delegations-/Berechtigungskonstellation behauptet.
+
+SICHERUNGEN, GEERBTE RECHTE UND RESTORE
+
+Vor jeder DACL-Änderung: JSON mit Objektidentität, Vorher-DACL und erwarteter
+Nachher-DACL. Owner und SACL werden nicht geschrieben. Für GPO-Schreibschritte
+wird zusätzlich Backup-GPO -All auf demselben DC ausgeführt. Das kann je nach
+GPO-Anzahl Zeit und Speicherplatz kosten. Ein GPO-Backup ersetzt nicht die
+DACL-Sicherungen und ist kein Backup des AGPM-Archivs.
+
+Veränderte DACLs/Objektidentitäten seit der Vorschau blockieren die Änderung.
+Vor dem Schreiben wird nochmals frisch gelesen. LDAP und SMB bieten hier
+jedoch keine gemeinsame Transaktion; zwischen letzter Prüfung und Schreiben
+bleibt ein kleines Konkurrenzfenster. Daher ist das Wartungsfenster nötig.
+
+Nur explizite Allow-/Deny-ACEs werden entfernt. Geerbte ACEs werden gemeldet
+und verschwinden gegebenenfalls nach der Bereinigung ihrer expliziten Quelle.
+Die Vererbung wird nicht deaktiviert. Quellen außerhalb des erlaubten Bereichs
+(z.B. oberhalb von SYSVOL/Policies) werden nicht angefasst. Eine resultierende
+leere DACL wird nicht automatisch geschrieben.
+
+Verwaiste Owner werden ausschließlich gemeldet. SACL-/Audit-ACEs sind nicht
+Teil dieser Version. Das bisherige Owner-Setzskript wurde deshalb nicht als
+automatische „Reparatur“ übernommen.
+
+Restore eines konkreten Schritt-Verzeichnisses:
+
+   .\Restore-ACLDacl.ps1 -BackupDirectory `
+       'C:\ProgramData\AD-ACL-Cleanup\Run-...\Domain-...\DaclBackups' -WhatIf
+
+   .\Restore-ACLDacl.ps1 -BackupDirectory `
+       'C:\ProgramData\AD-ACL-Cleanup\Run-...\Domain-...\DaclBackups'
+
+Beim gMSA-Schritt liegen die Sicherungen unter Gmsa-...\Apply\DaclBackups.
+Restore benötigt dieselben effektiven Änderungsrechte. Der mitgelieferte
+Restore startet keinen gMSA-Task und muss unter einem dafür berechtigten
+interaktiven Konto ausgeführt werden.
+
+Restore überschreibt keine inzwischen geänderte DACL und kein ersetztes
+Objekt. Bei Abweichung wird gewarnt. Eltern werden vor Kindern bearbeitet,
+damit zuvor entfernte geerbte Rechte zurückkommen können. Wegen asynchroner
+Vererbungsberechnung kann ein späterer erneuter Restore-Versuch nötig sein.
+
+Die unmittelbare Nachkontrolle ist nur auf dem festgelegten DC. Anschließend
+AD-/DFSR-Replikation, andere DCs und gegebenenfalls SDProp kontrollieren. Der
+Domänenschritt umfasst auch AdminSDHolder und geschützte Objekte; Änderungen
+an AdminSDHolder können durch SDProp weitere geschützte Objekte beeinflussen.
+
+DATEIEN UND STATUS
+
+  state.json       Wiederaufnahmepunkt
+  environment.json DC, Partitionen, SID-Prüfdomänen, Probleme
+  terminal-*.log   interaktiver Verlauf
+  before.csv       alle gemeldeten ACE-/Owner-Befunde vor dem Schritt
+  plan.json        genau die vorgesehenen Ziele und SIDs
+  changes.csv      Ergebnis je bearbeitetem Objekt
+  after.csv        vollständiger erneuter Befundscan nach dem Schritt
+  summary.json     Vorher/Nachher-Zahlen und Abschlussstatus
+  DaclBackups\     DACL-Sicherungen vor jedem Schreibversuch
+  GpoBackup\       GPO-Backups bei GPO-Schreibläufen
+
+„Complete=True“ bedeutet: alle im freigegebenen Plan vorgesehenen Ziele
+verarbeitet, keine erfassten Nachscan-Fehler, keine verbleibenden automatisch
+bereinigbaren expliziten ACEs. Unklare/fremde SIDs, Owner und geerbte Rest-
+befunde können trotzdem verbleiben. Die Berichte enthalten sensible AD-
+Strukturinformationen und sollten im geschützten Arbeitsordner verbleiben.
+
+VALIDIERUNG DIESER VERSION
+
+Alle PS1-/PSM1-Dateien wurden mit dem PowerShell-Parser geprüft. Test-Logic.ps1
+prüft mit Test-Doubles unter anderem aktive Konten/SIDHistory, fehlende oder
+frische Löschbelege, Fremd-SIDs, unerreichbare Prüfbereiche, erneute SID-Prüfung,
+ACL-Drift, Sicherung vor dem Schreiben, fehlerhafte Nachkontrolle, unzulässige
+Schreibziele und abgelaufene Pläne. Das sind Logiktests, keine Windows-
+Integrationstests. Task Scheduler, reale LDAP-DACLs, SMB, ADWS, Delegationen,
+DFSR und AGPM wurden hier nicht ausgeführt. Getesteter Parser: PowerShell 7.4;
+Produktionsziel: Windows PowerShell 5.1. Das Paket nutzt keine PS7-Sprachsyntax.
+
+TECHNISCHE MICROSOFT-REFERENZEN
+
+Active Directory security groups:
+https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/manage/understand-security-groups
+
+Security identifiers und SIDHistory:
+https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/manage/understand-security-identifiers
+
+LDAP security descriptor flags (nur DACL schreiben):
+https://learn.microsoft.com/en-us/previous-versions/windows/desktop/ldap/ldap-server-sd-flags-oid
+
+DirectoryEntryConfiguration.SecurityMasks:
+https://learn.microsoft.com/en-us/dotnet/api/system.directoryservices.directoryentryconfiguration.securitymasks
+
+gMSA-Verwaltung und unterstützte Dienste:
+https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/manage/group-managed-service-accounts/group-managed-service-accounts/manage-group-managed-service-accounts
+
+AGPM Import GPO from Production (separater, nicht automatisierter Vorgang):
+https://learn.microsoft.com/en-us/microsoft-desktop-optimization-pack/agpm/import-a-gpo-from-production-agpm40-ed

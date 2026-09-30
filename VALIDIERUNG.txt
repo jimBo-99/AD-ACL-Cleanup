@@ -1,0 +1,9 @@
+﻿Validierung am 30.09.2026
+
+PowerShell 7.4.6 Parser: keine Syntaxfehler.
+23 simulierte Logikpruefungen erfolgreich.
+PSScriptAnalyzer: keine Fehler; Hinweise zu bewusstem Write-Host fuer die
+Terminalfuehrung, internen Hilfsfunktionen und Test-Doubles.
+
+Keine Windows-PowerShell-5.1-/AD-/LDAP-/SYSVOL-/DFSR-/Task-Scheduler-
+Integration ausgefuehrt. Pilotpruefung erforderlich.
